@@ -355,7 +355,7 @@
                     <div class="settings-item">
                         <div>
                             <div class="settings-item-label">Speech Provider</div>
-                            <div class="settings-item-description">Choose Azure Speech or a local OpenAI Whisper CLI</div>
+                            <div class="settings-item-description">Choose Azure Speech or local Whisper</div>
                         </div>
                         <select class="input-field" id="speechProvider">
                             <option value="azure">Azure Speech</option>
@@ -395,7 +395,7 @@
                         <div class="settings-item">
                             <div>
                                 <div class="settings-item-label">Whisper Model</div>
-                                <div class="settings-item-description">Local model name used by the Whisper CLI</div>
+                                <div class="settings-item-description">Local model name. MLX uses base by default.</div>
                             </div>
                             <input type="text" class="input-field" id="whisperModel" placeholder="small">
                         </div>
@@ -446,7 +446,7 @@
                             <input type="number" class="input-field" id="whisperSegmentMs" placeholder="4000" min="2000" step="500">
                         </div>
                         <div class="settings-note">
-                            Local Whisper runs on this machine and needs a Whisper CLI installed. These settings apply immediately for the current app session and are also written back to <code>.env</code> so they persist across restarts.
+                            Local Whisper runs on this machine. On Apple Silicon the app uses MLX when installed by setup. Otherwise it uses the Whisper CLI. Settings are saved in <code>.env</code>.
                         </div>
                     </div>
 

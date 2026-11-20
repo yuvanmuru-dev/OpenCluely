@@ -439,11 +439,13 @@ class SpeechService extends EventEmitter {
     this.available = false;
     this.speechConfig = null;
     this.whisperCommand = null;
+    this.usesMlx = false;
 
     const provider = this._getConfiguredProvider();
     this.provider = provider;
 
     if (provider === 'azure') {
+      this.whisperWorker.close();
       this._initializeAzureClient();
       return;
     }
@@ -513,8 +515,13 @@ class SpeechService extends EventEmitter {
 
   _initializeWhisperClient() {
     try {
-      this.whisperCommand = this._resolveWhisperCommand();
-      if (!this.whisperCommand) {
+      const mlxPython = this.getMlxPythonPath();
+      this.usesMlx = Boolean(mlxPython);
+      if (!this.usesMlx) {
+        this.whisperCommand = this._resolveWhisperCommand();
+      }
+      if (!this.usesMlx && !this.whisperCommand) {
+        this.whisperWorker.close();
         const reason = 'Local Whisper unavailable. Install the Whisper CLI or set WHISPER_COMMAND.';
         logger.warn(reason);
         this.emit('status', reason);
@@ -522,13 +529,13 @@ class SpeechService extends EventEmitter {
       }
 
       this.available = true;
-      this._configureWhisperWorker();
+      this._configureWhisperWorker(mlxPython);
       logger.info('Local Whisper service initialized successfully', {
-        command: [this.whisperCommand.command, ...this.whisperCommand.baseArgs].join(' '),
-        model: this._getWhisperModel(),
+        backend: this.usesMlx ? 'MLX' : 'OpenAI Whisper',
+        model: this.getWhisperModel(),
         language: this._getWhisperLanguage()
       });
-      this.emit('status', 'Local Whisper ready');
+      this.emit('status', this.usesMlx ? 'Local Whisper ready (Apple GPU)' : 'Local Whisper ready');
     } catch (error) {
       logger.error('Failed to initialize local Whisper client', {
         error: error.message,
@@ -690,7 +697,7 @@ class SpeechService extends EventEmitter {
 
     if (this.whisperWorker.isConfigured()) {
       this.whisperWorker.warmup({
-        model: this._getWhisperModel(),
+        model: this.getWhisperModel(),
         modelDir: this._getWhisperModelDir(),
         device: this._getWhisperDevice()
       }).then((result) => {
@@ -700,7 +707,7 @@ class SpeechService extends EventEmitter {
           gpu: result.gpu
         });
       }).catch((error) => {
-        logger.warn('Whisper warmup failed; transcription will use fallback', {
+        logger.warn('Whisper warmup failed', {
           error: error.message
         });
       });
@@ -1132,6 +1139,14 @@ class SpeechService extends EventEmitter {
     }
 
     if (this.provider === 'whisper') {
+      if (this.usesMlx) {
+        try {
+          const result = await this.prepareMlxModel();
+          return { success: true, message: `MLX Whisper ${result.model} is ready on ${result.device}` };
+        } catch (error) {
+          return { success: false, message: error.message };
+        }
+      }
       if (!this.whisperCommand) {
         return { success: false, message: 'Local Whisper CLI not found' };
       }
@@ -1162,16 +1177,16 @@ class SpeechService extends EventEmitter {
       provider: this.provider,
       isRecording: this.isRecording,
       isProcessingAudio: this.isProcessingAudio,
-      isInitialized: this.provider === 'azure' ? !!this.speechConfig : !!this.whisperCommand,
+      isInitialized: this.provider === 'azure' ? !!this.speechConfig : this.isAvailable(),
       sessionDuration: this.sessionStartTime ? Date.now() - this.sessionStartTime : 0,
       retryCount: this.retryCount,
       effectiveSettings: {
         speechProvider: this.provider,
-        azureKey: this._getSetting('azureKey') || '',
         azureRegion: this._getSetting('azureRegion') || process.env.AZURE_SPEECH_REGION || '',
+        whisperBackend: this.usesMlx ? 'mlx' : 'openai',
         whisperCommand: this._getSetting('whisperCommand') || process.env.WHISPER_COMMAND || '',
         whisperModelDir: this._getWhisperModelDir(),
-        whisperModel: this._getWhisperModel(),
+        whisperModel: this.getWhisperModel(),
         whisperLanguage: this._getWhisperLanguage(),
         whisperCaptureMode: this._getWhisperCaptureMode(),
         whisperDevice: this._getWhisperDevice(),
@@ -1191,7 +1206,7 @@ class SpeechService extends EventEmitter {
     }
 
     if (this.provider === 'whisper') {
-      return !!this.whisperCommand && !!this.available;
+      return this.available && (this.usesMlx ? this.whisperWorker.isConfigured() : Boolean(this.whisperCommand));
     }
 
     return false;
@@ -1243,8 +1258,9 @@ class SpeechService extends EventEmitter {
     return 'whisper';
   }
 
-  _getWhisperModel() {
-    return this._getSetting('whisperModel') || process.env.WHISPER_MODEL || config.get('speech.whisper.model') || 'small';
+  getWhisperModel() {
+    const defaultModel = this.usesMlx ? 'base' : config.get('speech.whisper.model') || 'small';
+    return this._getSetting('whisperModel') || process.env.WHISPER_MODEL || defaultModel;
   }
 
   _getWhisperModelDir() {
@@ -1264,6 +1280,7 @@ class SpeechService extends EventEmitter {
    * WhisperInstaller.modelDir so transcription finds downloaded models.
    */
   _getUserDataModelDir() {
+    if (!process.versions.electron) return '';
     try {
       const { app } = require('electron');
       return path.join(app.getPath('userData'), '.whisper-models');
@@ -1386,6 +1403,23 @@ class SpeechService extends EventEmitter {
     return fs.existsSync(siblingPython) ? siblingPython : null;
   }
 
+  getMlxPythonPath() {
+    if (process.platform !== 'darwin' || process.arch !== 'arm64' || process.env.WHISPER_BACKEND === 'openai') {
+      return null;
+    }
+    const venv = path.join(os.homedir(), 'Library', 'Application Support', 'OpenCluely', 'WhisperMLX');
+    const python = path.join(venv, 'bin', 'python');
+    return fs.existsSync(path.join(venv, '.ready')) && fs.existsSync(python) ? python : null;
+  }
+
+  async prepareMlxModel() {
+    try {
+      return await this.whisperWorker.warmup({ model: this.getWhisperModel() });
+    } finally {
+      this.whisperWorker.releaseWhenIdle();
+    }
+  }
+
   _getWhisperWorkerScriptPath() {
     const sourcePath = path.resolve(__dirname, '..', '..', 'scripts', 'whisper_worker.py');
     return sourcePath.includes('app.asar')
@@ -1393,11 +1427,11 @@ class SpeechService extends EventEmitter {
       : sourcePath;
   }
 
-  _configureWhisperWorker() {
-    const pythonPath = this._getWhisperPythonPath();
+  _configureWhisperWorker(mlxPython) {
+    const pythonPath = mlxPython || this._getWhisperPythonPath();
     const scriptPath = this._getWhisperWorkerScriptPath();
-    const idleUnloadMs = Math.max(10000, Number(process.env.WHISPER_GPU_IDLE_MS || 60000));
-    this.whisperWorker.configure({ pythonPath, scriptPath, idleUnloadMs });
+    const idleUnloadMs = Math.max(10000, Number(process.env.WHISPER_GPU_IDLE_MS) || 60000);
+    this.whisperWorker.configure({ pythonPath, scriptPath, idleUnloadMs, useMlx: Boolean(mlxPython) });
 
     logger.info('Whisper worker configuration', {
       configured: this.whisperWorker.isConfigured(),
@@ -1414,6 +1448,7 @@ class SpeechService extends EventEmitter {
    * creates the venv in packaged builds.
    */
   _getUserDataWhisperCandidate() {
+    if (!process.versions.electron) return null;
     try {
       const { app } = require('electron');
       const userData = app.getPath('userData');
@@ -1893,7 +1928,7 @@ class SpeechService extends EventEmitter {
   }
 
   async _transcribeWhisperFile(audioFilePath) {
-    if (!this.whisperCommand) {
+    if (!this.whisperCommand && !this.usesMlx) {
       throw new Error('Local Whisper CLI not configured');
     }
 
@@ -1901,7 +1936,7 @@ class SpeechService extends EventEmitter {
       const startedAt = Date.now();
       try {
         const result = await this.whisperWorker.transcribe(audioFilePath, {
-          model: this._getWhisperModel(),
+          model: this.getWhisperModel(),
           language: this._getWhisperLanguage(),
           modelDir: this._getWhisperModelDir(),
           device: this._getWhisperDevice()
@@ -1915,6 +1950,7 @@ class SpeechService extends EventEmitter {
         });
         return result.text || '';
       } catch (error) {
+        if (this.usesMlx) throw error;
         logger.warn('Persistent Whisper worker failed; falling back to CLI', {
           error: error.message,
           workerTraceback: error.workerTraceback
@@ -1922,11 +1958,13 @@ class SpeechService extends EventEmitter {
       }
     }
 
+    if (this.usesMlx) throw new Error('MLX Whisper worker is unavailable. Run setup again to repair it.');
+
     const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opencluely-whisper-out-'));
     const args = [
       ...this.whisperCommand.baseArgs,
       audioFilePath,
-      '--model', this._getWhisperModel(),
+      '--model', this.getWhisperModel(),
       '--task', 'transcribe',
       '--output_format', 'txt',
       '--output_dir', outputDir,

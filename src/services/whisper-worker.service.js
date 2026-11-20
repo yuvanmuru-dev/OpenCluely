@@ -14,14 +14,15 @@ class WhisperWorkerService {
     this.idleTimer = null;
     this.idleUnloadMs = 60000;
     this.readyInfo = null;
-    this.closing = false;
+    this.useMlx = false;
   }
 
-  configure({ pythonPath, scriptPath, idleUnloadMs = 60000 }) {
-    const changed = this.pythonPath !== pythonPath || this.scriptPath !== scriptPath;
+  configure({ pythonPath, scriptPath, idleUnloadMs = 60000, useMlx = false }) {
+    const changed = this.pythonPath !== pythonPath || this.scriptPath !== scriptPath || this.useMlx !== useMlx;
     this.pythonPath = pythonPath;
     this.scriptPath = scriptPath;
     this.idleUnloadMs = idleUnloadMs;
+    this.useMlx = useMlx;
     if (changed) {
       this.close();
     }
@@ -78,15 +79,19 @@ class WhisperWorkerService {
     }
 
     this.readyInfo = null;
-    this.closing = false;
-    const child = spawn(this.pythonPath, ['-u', this.scriptPath], {
+    const args = ['-u', this.scriptPath];
+    if (this.useMlx) args.push('--mlx');
+    const child = spawn(this.pythonPath, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true
+      windowsHide: true,
+      env: this.useMlx ? { ...process.env, HF_HUB_DISABLE_IMPLICIT_TOKEN: '1', HF_HUB_DISABLE_PROGRESS_BARS: '1' } : process.env
     });
     this.process = child;
 
     const lines = readline.createInterface({ input: child.stdout });
-    lines.on('line', (line) => this._handleLine(line));
+    lines.on('line', (line) => {
+      if (this.process === child) this._handleLine(line);
+    });
 
     child.stderr.on('data', (chunk) => {
       const message = chunk.toString().trim();
@@ -96,21 +101,18 @@ class WhisperWorkerService {
     });
 
     child.on('error', (error) => {
+      if (this.process !== child) return;
       logger.error('Whisper worker process error', { error: error.message });
       this._rejectAll(error);
     });
 
     child.on('close', (code) => {
+      if (this.process !== child) return;
       const error = new Error(`Whisper worker exited with code ${code}`);
-      if (!this.closing && code !== 0) {
-        logger.error(error.message);
-      }
+      if (code !== 0) logger.error(error.message);
       this.process = null;
       this.readyInfo = null;
-      if (!this.closing) {
-        this._rejectAll(error);
-      }
-      this.closing = false;
+      this._rejectAll(error);
     });
   }
 
@@ -154,6 +156,7 @@ class WhisperWorkerService {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`Whisper worker timed out after ${timeoutMs}ms`));
+        this.close();
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
 
@@ -198,7 +201,6 @@ class WhisperWorkerService {
     this._clearIdleTimer();
     if (this.process && !this.process.killed) {
       try {
-        this.closing = true;
         this.process.kill();
       } catch (_) {
         // Ignore shutdown races.

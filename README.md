@@ -9,7 +9,7 @@ Real-time AI help on a stealth overlay that screen sharing cannot see. Ask by vo
 <p>
   <a href="https://github.com/TechyCSR/OpenCluely/releases/latest"><img src="https://img.shields.io/github/v/release/TechyCSR/OpenCluely?style=for-the-badge&label=Latest&color=111111&labelColor=000000" alt="Latest release" /></a>
   <a href="https://github.com/TechyCSR/OpenCluely/releases"><img src="https://img.shields.io/github/downloads/TechyCSR/OpenCluely/total?style=for-the-badge&color=111111&labelColor=000000" alt="Downloads" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-111111?style=for-the-badge&labelColor=000000" alt="MIT License" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-111111?style=for-the-badge&labelColor=000000" alt="Apache 2.0 License" /></a>
   <img src="https://img.shields.io/badge/Platforms-Windows%20%7C%20macOS%20%7C%20Linux-111111?style=for-the-badge&labelColor=000000" alt="Platforms" />
 </p>
 
@@ -39,7 +39,7 @@ It is free and open source. Processing stays on your machine, and the only thing
 - **Direct image analysis.** Screenshots go straight to Gemini for visual reasoning, with no slow OCR step in between.
 - **Session memory.** The whole conversation is remembered, so follow-ups, edge cases, and optimizations keep their context.
 - **Language aware.** Tailored answers for C++, C, Python, Java, and JavaScript.
-- **Stealthy by design.** Runs under ordinary system names, ships with no telemetry, and keeps your session local.
+- **Local session storage.** The app stores chat history on your device and sends requests to the configured AI and speech providers.
 - **Cross platform.** Pre-built installers for Windows and Linux (.deb and AppImage). macOS runs from source in one command.
 
 ## Download
@@ -59,6 +59,22 @@ Every build is produced automatically on GitHub Actions and ships with SHA-256 c
 The website at [opencluely.techycsr.dev](https://opencluely.techycsr.dev) detects your operating system and offers the right installer directly.
 
 ## Quick start
+
+### Apple Silicon
+
+Use a native arm64 terminal with Node.js 22.12 or newer and arm64 Python 3. Tested with Python 3.13 on Apple M5. Run these commands from the fork's checkout:
+
+```bash
+./setup.sh --ci --no-run
+npm run build:mac:arm64
+open dist/mac-arm64/OpenCluely.app
+```
+
+Use `npm start` to run from source. The app bundle is built and ad-hoc signed locally. Grant Microphone permission when using voice and Screen Recording permission when using screenshots. The app uses the OpenCluely name on macOS.
+
+On Apple Silicon, setup installs MLX Whisper in `~/Library/Application Support/OpenCluely/WhisperMLX`. Both launch paths use that environment automatically when you choose Whisper. The multilingual `base` model downloads once and runs locally on the Apple GPU. You can change the model in Settings. Use `WHISPER_BACKEND=openai ./setup.sh` to set up the original backend for source use.
+
+### General setup
 
 If you would rather build from source, three steps are all it takes.
 
@@ -85,7 +101,7 @@ If you would rather build from source, three steps are all it takes.
 
 - On Windows, use Git Bash (included with Git for Windows) or WSL to run `setup.sh`.
 - On macOS and Linux, your normal terminal works.
-- **macOS users must build from source** (steps above) — there is no pre-built `.dmg`. Because the app is unsigned, a downloaded build would be blocked by Gatekeeper as "damaged"; running from source avoids that entirely.
+- Apple Silicon users can run from source or build the local arm64 app bundle using the steps above.
 - No manual `npm` commands are needed. The script handles everything.
 
 ### Setup script options
@@ -189,7 +205,7 @@ OpenCluely is under active development. The core is stable and improvements ship
 
 - **setup.sh will not run.** Make sure you are in the project folder (`cd OpenCluely`) and that the script is executable (`chmod +x setup.sh`). On Windows, use Git Bash.
 - **Setup stops with exit code 130.** That means Ctrl+C was pressed. Run `./setup.sh` again.
-- **Node or npm not found.** Install Node.js 18 or newer from [nodejs.org](https://nodejs.org/), restart the terminal, and retry.
+- **Node or npm not found.** Install Node.js 22.12 or newer from [nodejs.org](https://nodejs.org/), restart the terminal, and retry.
 
 </details>
 

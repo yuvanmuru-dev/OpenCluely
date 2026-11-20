@@ -17,6 +17,7 @@ PLATFORM_BUILD_SCRIPT="build"
 PYTHON_BIN="python3"
 WHISPER_PIP_PATH=""
 WHISPER_COMMAND_PATH=""
+MLX_VENV_DIR="$HOME/Library/Application Support/OpenCluely/WhisperMLX"
 
 print_header() {
   echo "========================================"
@@ -47,9 +48,11 @@ Options:
 
 Environment variables:
   GEMINI_API_KEY          If provided, writes into .env
-  WHISPER_MODEL           Whisper model to configure (default: turbo)
+  WHISPER_MODEL           Whisper model for the original CLI setup (default: base)
   WHISPER_LANGUAGE        Whisper language to configure (default: en)
   WHISPER_SEGMENT_MS      Segment size in ms (default: 4000)
+  WHISPER_BACKEND         Set openai to use the original Whisper CLI on Apple Silicon
+  WHISPER_BOOTSTRAP_PYTHON  Python executable for MLX setup (default: python3)
 
 Example:
   GEMINI_API_KEY=your_key_here ./setup.sh --install-system-deps
@@ -63,6 +66,7 @@ for arg in "$@"; do
     --run) DO_RUN=1 ;;
     --ci) USE_CI=1 ;;
     --install-system-deps) INSTALL_SYSTEM_DEPS=1 ;;
+    --skip-install-system-deps) INSTALL_SYSTEM_DEPS=0 ;;
     --skip-whisper) SETUP_WHISPER=0 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $arg"; usage; exit 1 ;;
@@ -116,7 +120,7 @@ ensure_env_file() {
   if [[ ! -f .env ]]; then
     if [[ -f env.example ]]; then
       echo "Creating .env from env.example"
-      cp env.example .env
+      (umask 077; cp env.example .env; chmod 600 .env)
     else
       echo "Error: env.example is missing"
       exit 1
@@ -129,7 +133,8 @@ upsert_env() {
   local value="$2"
 
   if grep -q "^${key}=" .env 2>/dev/null; then
-    perl -0pi -e "s|^${key}=.*\$|${key}=${value}|m" .env
+    OPENCLUELY_ENV_KEY="$key" OPENCLUELY_ENV_VALUE="$value" \
+      perl -pi -e 's/^\Q$ENV{OPENCLUELY_ENV_KEY}\E=[^\r\n]*/$ENV{OPENCLUELY_ENV_KEY}=$ENV{OPENCLUELY_ENV_VALUE}/' .env
   else
     printf "%s=%s\n" "$key" "$value" >> .env
   fi
@@ -216,6 +221,26 @@ install_node_deps() {
   fi
 }
 
+setup_mlx_whisper() {
+  local python="${WHISPER_BOOTSTRAP_PYTHON:-python3}"
+  require_command "$python" "Install native Python 3 for Apple Silicon."
+  if ! "$python" -c 'import platform, sys; sys.exit(not (platform.machine() == "arm64" and sys.version_info >= (3, 10)))'; then
+    echo "Error: MLX Whisper needs native arm64 Python 3.10 or newer."
+    return 1
+  fi
+
+  local venv_python="$MLX_VENV_DIR/bin/python"
+  if [[ ! -x "$venv_python" ]]; then
+    "$python" -m venv "$MLX_VENV_DIR"
+  fi
+  if ! "$venv_python" -c 'from importlib.metadata import version; assert version("mlx-whisper") == "0.4.3"' 2>/dev/null; then
+    "$venv_python" -m pip install --disable-pip-version-check 'mlx-whisper==0.4.3'
+  fi
+  "$venv_python" -c 'import mlx.core as mx; from mlx_whisper import transcribe; assert mx.metal.is_available()'
+  touch "$MLX_VENV_DIR/.ready"
+  echo "MLX Whisper is ready. The base model is downloaded on first use."
+}
+
 setup_whisper_env() {
   if [[ "$SETUP_WHISPER" -ne 1 ]]; then
     echo "Skipping local Whisper setup"
@@ -226,6 +251,14 @@ setup_whisper_env() {
   if [[ "$DO_BUILD" -eq 1 && "$DO_RUN" -eq 0 ]]; then
     echo "Skipping local Whisper setup (build-only mode)"
     return
+  fi
+
+  if [[ "$OS_NAME" == "macos" && "$(uname -m)" == "arm64" ]]; then
+    if [[ "${WHISPER_BACKEND:-auto}" != "openai" ]] && ! grep -q '^WHISPER_BACKEND=openai$' .env; then
+      setup_mlx_whisper
+      return
+    fi
+    upsert_env "WHISPER_BACKEND" "openai"
   fi
 
   require_command "$PYTHON_BIN" "Python 3 is required for local Whisper setup."
@@ -260,7 +293,7 @@ setup_whisper_env() {
     if [[ -f "$venv_python" ]] && "$venv_python" -m whisper --help >/dev/null 2>&1; then
       echo "Whisper CLI not found as standalone script, but 'python -m whisper' works."
       echo "Adjusting WHISPER_COMMAND to use venv Python module."
-      WHISPER_COMMAND_PATH="$venv_python"
+      WHISPER_COMMAND_PATH="$venv_python -m whisper"
       whisper_found=1
     else
       echo "WARNING: Whisper CLI not found at $WHISPER_COMMAND_PATH"
@@ -270,8 +303,6 @@ setup_whisper_env() {
   fi
 
   upsert_env "SPEECH_PROVIDER" "whisper"
-  upsert_env "AZURE_SPEECH_KEY" ""
-  upsert_env "AZURE_SPEECH_REGION" ""
   upsert_env "WHISPER_COMMAND" "${WHISPER_COMMAND_PATH}"
   upsert_env "WHISPER_MODEL_DIR" "${WHISPER_MODEL_DIR}"
   upsert_env "WHISPER_MODEL" "${WHISPER_MODEL}"
@@ -289,7 +320,11 @@ setup_whisper_env() {
 build_app() {
   if [[ "$DO_BUILD" -eq 1 ]]; then
     echo "Building app for $OS_NAME with npm run $PLATFORM_BUILD_SCRIPT"
-    npm run "$PLATFORM_BUILD_SCRIPT"
+    if [[ "$OS_NAME" == "macos" && "$(uname -m)" == "arm64" ]]; then
+      npm run build:mac:arm64
+    else
+      npm run "$PLATFORM_BUILD_SCRIPT"
+    fi
   fi
 }
 
@@ -304,8 +339,17 @@ run_app() {
 
 detect_os
 echo "Detected OS: $OS_NAME"
-require_command node "Node.js 18+ is required."
+require_command node "Node.js 22.12+ is required."
 require_command npm "npm is required."
+if ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 12) ? 0 : 1)'; then
+  echo "Error: Node.js 22.12 or newer is required."
+  exit 1
+fi
+if [[ "$OS_NAME" == "macos" && "$(sysctl -in hw.optional.arm64 2>/dev/null)" == "1" ]] &&
+   [[ "$(node -p process.arch)" != "arm64" || "$(uname -m)" != "arm64" ]]; then
+  echo "Error: Run setup in a native arm64 terminal with arm64 Node.js."
+  exit 1
+fi
 echo "Node: $(node -v)"
 echo "npm:  $(npm -v)"
 

@@ -17,7 +17,10 @@ class LLMService {
   initializeClient() {
     const apiKey = config.getApiKey('GEMINI');
     
-    if (!apiKey || apiKey === 'your-api-key-here') {
+    if (!apiKey || apiKey === 'your-api-key-here' || apiKey === 'your_gemini_api_key_here') {
+      this.client = null;
+      this.model = null;
+      this.isInitialized = false;
       logger.warn('Gemini API key not configured', { 
         keyExists: !!apiKey,
         isPlaceholder: apiKey === 'your-api-key-here'

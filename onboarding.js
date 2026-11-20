@@ -244,9 +244,9 @@
       if (r.found) {
         state.whisperDetected = true;
         state.whisperCmd = r.command;
-        detectCmd.textContent = r.command;
-        setDetectStatus('success', `Found v${r.version || '?'}`);
-        appendLog(`✓ Detected Whisper CLI: ${r.command}`);
+        detectCmd.textContent = r.backend === 'mlx' ? 'MLX Whisper (Apple GPU)' : r.command;
+        setDetectStatus('success', r.backend === 'mlx' ? 'Ready' : `Found v${r.version || '?'}`);
+        appendLog(`✓ Detected ${detectCmd.textContent}`);
       } else {
         detectCmd.textContent = 'not found';
         setDetectStatus('error', 'Not installed');
@@ -336,12 +336,11 @@
         ],
       },
       darwin: {
-        title: "We'll create a project-local venv and install openai-whisper",
+        title: 'Set up local Whisper on macOS',
         steps: [
-          'Uses your existing Python 3 (install via Homebrew if missing).',
-          'A new <code>.venv-whisper/</code> folder is created in the app data directory.',
-          'Whisper installs into that venv — no <code>sudo</code> required.',
-          'First transcription downloads the <code>small</code> model (~461 MB).',
+          'On Apple Silicon, run <code>./setup.sh</code> from the fork to install MLX Whisper for the Apple GPU.',
+          'The installer below sets up the original Whisper backend in the app data directory.',
+          'The model can be downloaded now or on first transcription.',
         ],
       },
       other: {
@@ -422,7 +421,7 @@
     }
 
     try {
-      const r = await window.electronAPI.downloadWhisperModel('small');
+      const r = await window.electronAPI.downloadWhisperModel();
       state.modelDownloading = false;
       if (r.ok) {
         state.modelDownloaded = true;

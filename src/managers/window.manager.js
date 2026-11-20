@@ -1480,10 +1480,7 @@ class WindowManager {
       channel, 
       windowCount: this.windows.size,
       windowStates,
-      dataKeys: data ? Object.keys(data) : [],
-      // Fixed: Check for 'content' instead of 'response' to match actual data structure
-      dataPreview: data && data.content ? data.content.substring(0, 50) + '...' : 
-                   data && data.response ? data.response.substring(0, 50) + '...' : 'No response'
+      dataKeys: data ? Object.keys(data) : []
     });
   }
 

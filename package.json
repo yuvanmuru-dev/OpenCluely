@@ -9,6 +9,7 @@
     "test-speech": "node scripts/test-speech.js",
     "build": "electron-builder",
     "build:mac": "electron-builder --mac",
+    "build:mac:arm64": "electron-builder --mac --arm64 --dir -c.mac.identity=-",
     "build:win": "electron-builder --win",
     "build:linux": "electron-builder --linux",
     "build:all": "electron-builder --mac --win --linux",
@@ -28,7 +29,10 @@
     "type": "git",
     "url": "https://github.com/TechyCSR/OpenCluely"
   },
-  "license": "ISC",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "dependencies": {
     "@fortawesome/fontawesome-free": "^7.2.0",
     "@google/genai": "^2.9.0",
@@ -42,8 +46,8 @@
     "winston-daily-rotate-file": "^4.7.1"
   },
   "devDependencies": {
-    "electron": "^29.1.0",
-    "electron-builder": "^24.13.3"
+    "electron": "45.4.1",
+    "electron-builder": "26.18.0"
   },
   "build": {
     "appId": "com.opencluely.app",
@@ -58,11 +62,13 @@
       "!.git/**/*",
       "!.env*",
       "!.venv-whisper/**/*",
+      "!.venv-whisper-mlx/**/*",
       "!.whisper-models/**/*",
       "!bin/**/*",
       "!scripts/__pycache__/**/*",
       "!**/*.pyc",
-      "!eng.traineddata"
+      "!eng.traineddata",
+      "env.example"
     ],
     "asarUnpack": [
       "assests/icons/**/*",
@@ -112,8 +118,7 @@
             "ia32"
           ]
         }
-      ],
-      "sign": null
+      ]
     },
     "linux": {
       "target": [

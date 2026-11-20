@@ -677,9 +677,9 @@ class MainWindowUI {
      * dependencies are unavailable.
      */
     async _startRendererAudioCapture() {
+        this._stopRendererAudioCapture();
+        const request = this._audioCaptureRequest;
         try {
-            this._stopRendererAudioCapture();
-
             const stream = await navigator.mediaDevices.getUserMedia({
                 audio: {
                     echoCancellation: true,
@@ -688,6 +688,10 @@ class MainWindowUI {
                     sampleRate: { ideal: 16000 }
                 }
             });
+            if (request !== this._audioCaptureRequest || !this.isRecording) {
+                stream.getTracks().forEach((track) => track.stop());
+                return;
+            }
             this._mediaStream = stream;
 
             const audioContext = new (window.AudioContext || window.webkitAudioContext)({
@@ -715,9 +719,12 @@ class MainWindowUI {
 
             source.connect(scriptNode);
             scriptNode.connect(audioContext.destination);
+            await audioContext.resume();
 
             logger.info('Renderer audio capture started', { component: 'MainWindowUI' });
         } catch (error) {
+            if (request !== this._audioCaptureRequest) return;
+            this._stopRendererAudioCapture();
             logger.error('Failed to start renderer audio capture', {
                 component: 'MainWindowUI',
                 error: error.message
@@ -730,6 +737,7 @@ class MainWindowUI {
     }
 
     _stopRendererAudioCapture() {
+        this._audioCaptureRequest = (this._audioCaptureRequest ?? 0) + 1;
         try {
             if (this._scriptNode) {
                 this._scriptNode.disconnect();

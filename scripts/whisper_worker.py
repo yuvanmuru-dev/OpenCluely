@@ -4,10 +4,23 @@ import os
 import sys
 import traceback
 import wave
+from pathlib import Path
 
 import numpy as np
-import torch
-import whisper
+
+USE_MLX = '--mlx' in sys.argv
+SAMPLE_RATE = 16000
+
+if USE_MLX:
+    from huggingface_hub import snapshot_download
+    import mlx.core as mx
+    from mlx_whisper.transcribe import ModelHolder, transcribe as mlx_transcribe
+
+    if not mx.metal.is_available():
+        raise RuntimeError('MLX Whisper needs an available Apple GPU')
+else:
+    import torch
+    import whisper
 
 
 model = None
@@ -28,8 +41,50 @@ def unload_model():
     model_dir = None
     model_device = None
     gc.collect()
-    if torch.cuda.is_available():
+    if USE_MLX:
+        ModelHolder.model = None
+        ModelHolder.model_path = None
+        mx.clear_cache()
+    elif torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def ensure_mlx_model(request):
+    global model_name, model_dir
+    name = request.get('model') or 'base'
+    if name == model_name and ModelHolder.model_path is not None:
+        return ModelHolder.model_path
+
+    unload_model()
+    if Path(name).expanduser().is_dir():
+        model_path = str(Path(name).expanduser().resolve())
+    else:
+        repos = {
+            'tiny': 'mlx-community/whisper-tiny',
+            'base': 'mlx-community/whisper-base-mlx',
+            'small': 'mlx-community/whisper-small-mlx',
+            'medium': 'mlx-community/whisper-medium-mlx',
+            'large-v3': 'mlx-community/whisper-large-v3-mlx',
+            'turbo': 'mlx-community/whisper-turbo',
+        }
+        if name not in repos:
+            raise ValueError('Choose tiny, base, small, medium, large-v3, turbo, or a local MLX model folder')
+        # Use cached weights for offline warmups. Only contact the Hub when the
+        # required files are missing from the cache.
+        files = ['config.json', 'weights.safetensors', 'weights.npz']
+        from huggingface_hub.errors import LocalEntryNotFoundError
+        try:
+            model_path = snapshot_download(repos[name], allow_patterns=files, local_files_only=True)
+            cached = Path(model_path)
+            if not (cached / 'config.json').is_file() or not any((cached / file).is_file() for file in files[1:]):
+                raise LocalEntryNotFoundError('Model weights are missing from the cache')
+        except LocalEntryNotFoundError:
+            model_path = snapshot_download(repos[name], allow_patterns=files)
+
+    ModelHolder.get_model(model_path, mx.float16)
+    model_name = name
+    model_dir = model_path
+    return model_path
 
 
 def ensure_model(request):
@@ -84,8 +139,8 @@ def load_audio_input(audio_path):
             samples = samples.reshape(-1, channels).mean(axis=1)
         samples /= 32768.0
 
-        if sample_rate != whisper.audio.SAMPLE_RATE and samples.size:
-            output_size = max(1, round(samples.size * whisper.audio.SAMPLE_RATE / sample_rate))
+        if sample_rate != SAMPLE_RATE and samples.size:
+            output_size = max(1, round(samples.size * SAMPLE_RATE / sample_rate))
             source_positions = np.arange(samples.size, dtype=np.float64)
             target_positions = np.linspace(0, samples.size - 1, output_size)
             samples = np.interp(target_positions, source_positions, samples).astype(np.float32)
@@ -98,37 +153,50 @@ def load_audio_input(audio_path):
 
 
 def transcribe(request):
-    loaded_model, device = ensure_model(request)
     language = request.get('language') or None
     if language in ('auto', 'detect'):
         language = None
 
-    result = loaded_model.transcribe(
-        load_audio_input(request['audio_path']),
+    audio = load_audio_input(request['audio_path'])
+    options = dict(
         language=language,
         task='transcribe',
-        fp16=device == 'cuda',
         verbose=None,
         temperature=0,
         condition_on_previous_text=False,
     )
+    if USE_MLX:
+        result = mlx_transcribe(audio, path_or_hf_repo=ensure_mlx_model(request), **options)
+        device = 'metal'
+    else:
+        loaded_model, device = ensure_model(request)
+        result = loaded_model.transcribe(audio, fp16=device == 'cuda', **options)
+
     return {
         'text': (result.get('text') or '').strip(),
         'language': result.get('language'),
         'device': device,
         'model': model_name,
-        'cuda_available': torch.cuda.is_available(),
-        'gpu': torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        **device_info(),
+    }
+
+
+def device_info():
+    if USE_MLX:
+        return {'mlx': mx.__version__, 'cuda_available': False, 'gpu': mx.device_info().get('device_name')}
+    cuda_available = torch.cuda.is_available()
+    return {
+        'torch': torch.__version__,
+        'cuda_available': cuda_available,
+        'torch_cuda': torch.version.cuda,
+        'gpu': torch.cuda.get_device_name(0) if cuda_available else None,
     }
 
 
 send({
     'event': 'ready',
     'pid': os.getpid(),
-    'torch': torch.__version__,
-    'cuda_available': torch.cuda.is_available(),
-    'torch_cuda': torch.version.cuda,
-    'gpu': torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+    **device_info(),
 })
 
 for raw_line in sys.stdin:
@@ -145,15 +213,19 @@ for raw_line in sys.stdin:
         if action == 'transcribe':
             send({'id': request_id, 'ok': True, **transcribe(request)})
         elif action == 'warmup':
-            _, device = ensure_model(request)
+            if USE_MLX:
+                ensure_mlx_model(request)
+                device = 'metal'
+            else:
+                _, device = ensure_model(request)
             send({
                 'id': request_id,
                 'ok': True,
                 'warmed': True,
                 'device': device,
                 'model': model_name,
-                'cuda_available': torch.cuda.is_available(),
-                'gpu': torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+                'model_path': model_dir,
+                **device_info(),
             })
         elif action == 'unload':
             unload_model()

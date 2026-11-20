@@ -16,7 +16,7 @@ function resolveEnvPath() {
     const projectEnv = path.join(process.cwd(), ".env");
     // Prefer a project .env only when it already exists and userData has none
     // (i.e. a developer running from the repo). Otherwise use userData.
-    if (!fs.existsSync(userDataEnv) && fs.existsSync(projectEnv)) {
+    if (!app.isPackaged && fs.existsSync(projectEnv)) {
       return projectEnv;
     }
     return userDataEnv;
@@ -156,6 +156,7 @@ class ApplicationController {
   }
 
   setupStealth() {
+    if (process.platform === "darwin") return;
     if (config.get("stealth.disguiseProcess")) {
       process.title = config.get("app.processTitle");
     }
@@ -166,13 +167,6 @@ class ApplicationController {
     }
     process.title = "Terminal ";
 
-    if (
-      process.platform === "darwin" &&
-      config.get("stealth.noAttachConsole")
-    ) {
-      process.env.ELECTRON_NO_ATTACH_CONSOLE = "1";
-      process.env.ELECTRON_NO_ASAR = "1";
-    }
   }
 
   setupEventHandlers() {
@@ -226,8 +220,10 @@ class ApplicationController {
     this.starting = true;
 
     // Force stealth mode IMMEDIATELY when app is ready
-    app.setName("Terminal ");
-    process.title = "Terminal ";
+    if (process.platform !== "darwin") {
+      app.setName("Terminal ");
+      process.title = "Terminal ";
+    }
 
     logger.info("Application starting", {
       version: config.get("app.version"),
@@ -318,15 +314,6 @@ class ApplicationController {
         details.requestHeaders['User-Agent'] = platformUA;
       }
       callback({ requestHeaders: details.requestHeaders });
-    });
-    
-    // Handle certificate errors for Google APIs
-    ses.setCertificateVerifyProc((request, callback) => {
-      if (request.hostname === 'generativelanguage.googleapis.com') {
-        callback(0); // Trust Google's certificates
-      } else {
-        callback(-2); // Use default verification
-      }
     });
     
     logger.debug('Network configuration applied for Gemini API');
@@ -632,8 +619,7 @@ class ApplicationController {
           await this.processWithLLM(text, sessionHistory);
         } catch (error) {
           logger.error("Failed to process chat message with LLM", {
-            error: error.message,
-            text: text.substring(0, 100)
+            error: error.message
           });
         }
       })();
@@ -797,6 +783,9 @@ class ApplicationController {
     // Detect an installed Whisper CLI across common locations.
     ipcMain.handle("detect-whisper", async () => {
       try {
+        if (speechService.getMlxPythonPath()) {
+          return { found: true, backend: 'mlx', command: null };
+        }
         const installer = this.getWhisperInstaller();
         return await installer.detect();
       } catch (e) {
@@ -826,9 +815,13 @@ class ApplicationController {
     // Download Whisper model. Streams progress lines back via `webContents.send`
     ipcMain.handle("download-whisper-model", async (event, modelName) => {
       try {
+        if (speechService.getStatus().effectiveSettings.whisperBackend === 'mlx') {
+          const result = await speechService.prepareMlxModel();
+          return { ok: true, path: result.model_path };
+        }
         const installer = this.getWhisperInstaller();
         const sender = event.sender;
-        const result = await installer.downloadModel(modelName || 'small', {
+        const result = await installer.downloadModel(modelName || speechService.getWhisperModel(), {
           onProgress: (line) => {
             try { sender.send("install-progress", line); } catch (_) { /* ignore */ }
           },
@@ -1183,7 +1176,6 @@ class ApplicationController {
         skill: this.activeSkill,
         programmingLanguage: needsProgrammingLanguage ? this.codingLanguage : 'not applicable',
         processingTime: llmResult.metadata.processingTime,
-        responsePreview: llmResult.response.substring(0, 200) + "...",
       });
 
       // Add LLM response to session memory
@@ -1280,8 +1272,7 @@ class ApplicationController {
       await this.processTranscriptionWithLLM(combined, sessionHistory);
     } catch (error) {
       logger.error("Failed to process transcription with LLM", {
-        error: error.message,
-        text: combined.substring(0, 100)
+        error: error.message
       });
     } finally {
       this._utteranceDispatchInFlight = false;
@@ -1317,8 +1308,7 @@ class ApplicationController {
 
       logger.info("Processing transcription with intelligent LLM response", {
         skill: this.activeSkill,
-        textLength: cleanText.length,
-        textPreview: cleanText.substring(0, 100) + "..."
+        textLength: cleanText.length
       });
 
       // Check if current skill needs programming language context
@@ -1380,8 +1370,7 @@ class ApplicationController {
       logger.error("Transcription LLM processing failed", {
         error: error.message,
         errorStack: error.stack,
-        skill: this.activeSkill,
-        text: text ? text.substring(0, 100) : 'undefined'
+        skill: this.activeSkill
       });
 
       // Try to provide a fallback response
@@ -1458,7 +1447,6 @@ class ApplicationController {
       responseLength: llmResult.response.length,
       skill: this.activeSkill,
       dataKeys: Object.keys(broadcastData),
-      responsePreview: llmResult.response.substring(0, 100) + "...",
     });
 
     windowManager.broadcastToAllWindows("llm-response", broadcastData);
@@ -1482,8 +1470,7 @@ class ApplicationController {
 
     logger.info("Broadcasting transcription LLM response to all windows", {
       responseLength: llmResult.response.length,
-      skill: this.activeSkill,
-      responsePreview: llmResult.response.substring(0, 100) + "..."
+      skill: this.activeSkill
     });
 
     windowManager.broadcastToAllWindows("transcription-llm-response", broadcastData);
@@ -1599,7 +1586,7 @@ class ApplicationController {
       azureKey: process.env.AZURE_SPEECH_KEY || "",
       azureRegion: process.env.AZURE_SPEECH_REGION || "",
       whisperCommand: process.env.WHISPER_COMMAND || "",
-      whisperModel: process.env.WHISPER_MODEL || "small",
+      whisperModel: speechService.getWhisperModel(),
       whisperLanguage: process.env.WHISPER_LANGUAGE || "auto",
       whisperDevice: process.env.WHISPER_DEVICE || "auto",
       whisperCaptureMode: process.env.WHISPER_CAPTURE_MODE ||
@@ -1686,6 +1673,9 @@ class ApplicationController {
       const prevWhisperCommand = process.env.WHISPER_COMMAND || '';
 
       const persistedKeys = this.persistEnvUpdates(envUpdates);
+      if (Object.keys(envUpdates).length && !persistedKeys.length) {
+        return { success: false, error: "Could not save provider settings to disk" };
+      }
 
       // If the Gemini key was just saved, reinitialize the LLM service
       // so the new client picks up the key. Without this, the test-
@@ -1740,7 +1730,7 @@ class ApplicationController {
       }
 
       logger.info("Settings saved successfully", {
-        ...settings,
+        changedSettings: Object.keys(settings),
         persistedEnvKeys: persistedKeys
       });
       return { success: true, persistedEnvKeys: persistedKeys };
@@ -1808,16 +1798,10 @@ class ApplicationController {
       }
     }
 
-    // Update process.env so the running app picks up the new values
-    // immediately (and so the settings UI reads the same source of truth).
-    for (const key of keys) {
-      process.env[key] = String(updates[key]);
-    }
-
     const newContent = outLines.join("\n");
     try {
       const tmpPath = envPath + ".tmp";
-      fs.writeFileSync(tmpPath, newContent, "utf8");
+      fs.writeFileSync(tmpPath, newContent, { encoding: "utf8", mode: 0o600 });
       fs.renameSync(tmpPath, envPath);
     } catch (e) {
       logger.error("Failed to persist .env updates", {
@@ -1827,6 +1811,9 @@ class ApplicationController {
       return [];
     }
 
+    for (const key of keys) {
+      process.env[key] = String(updates[key]);
+    }
     logger.info("Persisted .env updates", { keys: Array.from(updated) });
     return Array.from(updated);
   }
@@ -1914,28 +1901,12 @@ class ApplicationController {
   }
 
   updateAppName(appName, iconKey) {
+    if (process.platform === "darwin") return;
     try {
       const { app } = require("electron");
 
       // Force update process title for Activity Monitor stealth - CRITICAL
       process.title = appName;
-
-      // Set app name in dock (macOS) - this affects the dock and Activity Monitor
-      if (process.platform === "darwin") {
-        // Multiple attempts to ensure the name sticks
-        app.setName(appName);
-
-        // Clear dock badge and reset
-        if (app.dock) {
-          app.dock.setBadge("");
-          // Force dock refresh
-          setTimeout(() => {
-            app.dock.setIcon(
-              require("path").resolve(__dirname, `assests/icons/${iconKey}.png`)
-            );
-          }, 50);
-        }
-      }
 
       // Set app user model ID for Windows taskbar grouping (Windows only)
       if (process.platform === "win32") {
@@ -1957,13 +1928,6 @@ class ApplicationController {
       refreshTimes.forEach((delay) => {
         setTimeout(() => {
           process.title = appName;
-          if (process.platform === "darwin") {
-            app.setName(appName);
-            // Force update bundle display name
-            if (app.getName() !== appName) {
-              app.setName(appName);
-            }
-          }
         }, delay);
       });
 
